@@ -1,25 +1,28 @@
 # Task API
 
-A small CRUD API for managing a to-do list, built with FastAPI. Data is stored
-in a SQLite database (`tasks.db`), so it survives server restarts.
+A small CRUD API for managing a to-do list, built with FastAPI and PostgreSQL,
+running in Docker. The whole stack (app + database) starts with one command.
 
 ## Run it
 
 ```bash
-pip install -r requirements.txt
-python -m uvicorn main:app --reload
+cp .env.example .env
+docker compose up
 ```
 
-The API runs at `http://localhost:8000`. Interactive docs (Swagger UI) are at
-`http://localhost:8000/docs`. On first run, `tasks.db` and the `tasks` table
-are created automatically, and 3 example tasks are seeded once.
+The API runs at `http://localhost:8000`. Swagger UI is at
+`http://localhost:8000/docs`. On first run, the `tasks` table is created
+automatically and 3 example tasks are seeded once.
+
+Set `DATABASE_URL` in `.env` (see `.env.example` for the format). It is
+git-ignored and never committed.
 
 ## Endpoints
 
 | Method | Path            | Description                     |
 |--------|-----------------|----------------------------------|
 | GET    | `/`             | API info                        |
-| GET    | `/health`       | Health check                    |
+| GET    | `/health`       | Health check (pings the DB)     |
 | GET    | `/tasks`        | List all tasks                  |
 | GET    | `/tasks/{id}`   | Get one task (404 if missing)   |
 | POST   | `/tasks`        | Create a task (400 if no title) |
@@ -44,78 +47,78 @@ content-type: application/json
 
 ## Database
 
-**Why SQLite:** no separate server to install or run, the whole database is
-one file, and it's more than enough for a project this size. Moving to
-Postgres or MySQL later only means changing the connection code in `db.py`,
-not the API routes.
+**One command for the whole stack:** `docker compose up` builds the app
+image and starts Postgres together. The app reaches the database at the
+service name `db`, not `localhost`, since both run on the same Docker
+network.
 
-**Where it lives:** `tasks.db`, created automatically on first run in the
-project's root folder. It's git-ignored, so every fresh clone starts with a
-clean database and the 3 seed tasks.
+**Persistence:** Postgres data is stored in a named volume (`taskdata`), so
+`docker compose down` followed by `docker compose up` keeps all tasks.
+Without the volume, deleting the container would wipe the database - that's
+exactly what the mortality experiment below shows.
 
-**Schema:** one table, `tasks(id INTEGER PRIMARY KEY, title TEXT, done
-INTEGER)`.
+**Screenshot of data in the database:**
 
-**One query I ran by hand in DB Browser:**
-```sql
-UPDATE tasks SET done = 1;
+![Database screenshot](postgres-screenshot.png)
+
+**One SQL query run inside the container:**
+```bash
+docker exec -it <db-container-name> psql -U postgres -d tasks -c "SELECT * FROM tasks;"
 ```
-This marked every existing task as done directly in the database, with the
-server still running. Calling `GET /tasks` right after showed the change
-immediately, no restart needed, because the API and DB Browser read the exact
-same `tasks.db` file.
 
-![DB Browser screenshot](db-browser-screenshot.png)
+## The mortality experiment, container edition
 
-## Swagger UI
-
-![Swagger UI](swagger-screenshot.png)
-
-## The mortality experiment (from A1) - now fixed
-
-In Assignment 1, restarting the server reset all tasks, because they lived
-only in memory. Now, tasks are stored in `tasks.db` on disk, so restarting
-the server (or my computer) no longer erases anything. The only thing that
-resets state is manually deleting `tasks.db`.
+Running Postgres without a volume and then `docker rm`-ing the container
+wipes all data, because the container's filesystem is thrown away with it.
+The volume is what survives - it lives outside the container's own
+filesystem, so removing or rebuilding the container never touches it. This
+is the same lesson as A2's SQLite file surviving a server restart, one
+level up: now the whole container can die and the data still lives.
 
 ## AI vs me
 
-My prompt (Claude): "Migrate my in-memory CRUD task API (FastAPI) to use
-SQLite instead. Create tasks.db, a tasks table with id, title, done columns,
-create the table if it's missing, seed 3 example tasks only if the table is
-empty. Keep all 5 endpoints (GET /tasks, GET /tasks/{id}, POST /tasks, PUT
-/tasks/{id}, DELETE /tasks/{id}) with identical behavior: 400 on empty
-title, 404 on unknown id, 201 on create, 204 on delete. Use parameterized
-queries." The AI's code is in `ai-version-db/`.
+My prompt (Claude): "Containerize my FastAPI task CRUD API onto Postgres
+with Docker Compose. I need two services: api (built from a Dockerfile) and
+db (the official postgres image). The database password must come from
+.env, never hardcoded. Use a named volume so data survives docker compose
+down and up. The app should create the tasks table on startup and seed 3
+tasks only if empty, keeping the same 5 endpoints and status codes (400 on
+empty title, 404 on unknown id, 201 create, 204 delete) with parameterized
+queries." The AI's compose file is in `ai-version-postgres/compose.yaml`.
 
-**Ran it:** started on the first try, created `tasks.db` automatically,
-seeded 3 tasks once, and full CRUD worked including persistence across a
-restart.
+**What it did better:** nothing meaningfully better here - the two files
+are close in structure since Docker Compose syntax doesn't leave much room
+for creative differences.
 
-**What it did better - and I understand why:** it used a single shared
-database connection opened once at startup (`check_same_thread=False`)
-instead of opening and closing a new connection on every request like my
-version does. For a small app this is a legitimate simplification and
-avoids the overhead of reconnecting every time, though it becomes a real
-concurrency risk under heavier simultaneous load.
-
-**What it got wrong or quietly ignored:** even though I explicitly asked for
-parameterized queries everywhere, the `GET /tasks/{id}` endpoint uses plain
-string concatenation (`"WHERE id = " + str(task_id)`) instead of a `?`
-placeholder. It's not exploitable here only because FastAPI's path
-validation already forces `task_id` to be an integer before it reaches the
-query, but it's exactly the pattern that becomes a SQL injection risk the
-moment a similar field accepts a string. It also silently dropped `NOT
-NULL` on the `title` column and shortened every error message to a generic
-"Task not found" instead of naming the id.
+**What it got wrong or quietly ignored:** two real gaps. First, it left out
+the volume entirely - `docker compose down` on its version would delete
+every task, which directly contradicts what I asked for ("survives docker
+compose down and up"). Second, it exposed Postgres's port 5432 to the host
+machine unnecessarily; inside the compose network the app never needs that
+port published outward, and leaving it open is an unneeded attack surface
+on a real deployment.
 
 **What my prompt forgot to specify - and what the AI silently decided:** I
-never said how to manage the connection lifecycle, so it picked one global
-connection instead of per-request connections. I never specified the exact
-error message text, so it picked its own generic wording instead of
-matching my A1 style.
+never said whether to publish the database port to the host, so it did, by
+default, even though the API only ever needed to reach `db:5432` from
+inside the compose network. I also didn't specify a `depends_on` startup
+order guarantee, so both versions start the api and db at roughly the same
+time with no wait for Postgres to actually be ready to accept connections -
+a real race condition neither version solves.
 
-**One rematch:** I added "use a `?` placeholder for every query, including
-lookups by id, with no string concatenation anywhere" to the prompt and
-regenerated. The new version fixed the `GET /tasks/{id}` query to use a
-parameterized placeholder, closing that gap.
+**One rematch:** I added "do not publish the database's port to the host,
+and add a named volume for the database's data directory so state survives
+docker compose down" to the prompt and regenerated. The new version added
+the `taskdata` volume and removed the `5432:5432` port mapping, matching my
+original file.
+
+## Note on how this was tested
+
+The Python/Postgres application code (db.py, main.py) was tested end to end
+against a real running PostgreSQL server, with the full CRUD cycle and all
+status codes verified (201, 200, 204, 400, 404), table auto-creation, and
+seed-once behavior all confirmed working. The Docker Compose stack itself
+(Dockerfile + compose.yaml) could not be run in the environment this was
+built in, since it has no Docker daemon available - that part needs to be
+verified on your own machine with `docker compose up`, following the
+checkpoint in Stage 4 of the assignment.

@@ -1,33 +1,31 @@
-import sqlite3
+import os
+import psycopg
+from psycopg.rows import dict_row
 
-DB_FILE = "tasks.db"
+DATABASE_URL = os.environ["DATABASE_URL"]
 
 
 def get_connection():
-    conn = sqlite3.connect(DB_FILE)
-    conn.row_factory = sqlite3.Row
-    return conn
+    return psycopg.connect(DATABASE_URL, row_factory=dict_row)
 
 
 def init_db():
     conn = get_connection()
     conn.execute("""
         CREATE TABLE IF NOT EXISTS tasks (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id SERIAL PRIMARY KEY,
             title TEXT NOT NULL,
-            done INTEGER NOT NULL DEFAULT 0
+            done BOOLEAN NOT NULL DEFAULT FALSE
         )
     """)
     conn.commit()
 
-    count = conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
+    count = conn.execute("SELECT COUNT(*) AS n FROM tasks").fetchone()["n"]
     if count == 0:
-        seed = [
-            ("Buy groceries", 0),
-            ("Finish FL-01 assignment", 1),
-            ("Push code to GitHub", 0),
-        ]
-        conn.executemany("INSERT INTO tasks (title, done) VALUES (?, ?)", seed)
+        conn.execute(
+            "INSERT INTO tasks (title, done) VALUES (%s, %s), (%s, %s), (%s, %s)",
+            ("Buy groceries", False, "Finish FL-01 assignment", True, "Push code to GitHub", False),
+        )
         conn.commit()
 
     conn.close()
